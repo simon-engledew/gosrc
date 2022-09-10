@@ -1,39 +1,57 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
-	"github.com/simon-engledew/gosrc/walk"
 	"go/build"
 	"golang.org/x/mod/modfile"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
-func printSources(w io.Writer, rel string) func(pkg *build.Package) error {
-	seen := make(map[string]struct{})
-
-	return func(pkg *build.Package) error {
-		for _, src := range pkg.GoFiles {
-			abspath := filepath.Join(pkg.Dir, src)
-			if _, ok := seen[abspath]; ok {
-				continue
-			}
-			seen[abspath] = struct{}{}
-			relpath, err := filepath.Rel(rel, abspath)
-			if err != nil {
-				return err
-			}
-			if _, err := fmt.Fprintln(w, relpath); err != nil {
-				return err
-			}
-		}
+func walk(pkg *build.Package, root string, out map[string][]string) error {
+	if pkg.Goroot {
 		return nil
 	}
+
+	if _, ok := out[pkg.ImportPath]; ok {
+		return nil
+	}
+
+	found := pkg.GoFiles
+
+	for n, src := range found {
+		abspath := filepath.Join(pkg.Dir, src)
+		relpath, err := filepath.Rel(pkg.Root, abspath)
+		if err != nil {
+			return err
+		}
+		found[n] = relpath
+	}
+
+	out[pkg.ImportPath] = found
+
+	for _, name := range pkg.Imports {
+		if !strings.HasPrefix(name, root) {
+			continue
+		}
+		if _, ok := out[name]; ok {
+			continue
+		}
+
+		dep, err := build.Import(name, ".", build.ImportComment)
+		if err != nil {
+			return fmt.Errorf("failed to import %s: %w", name, err)
+		}
+
+		if err := walk(dep, root, out); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func main() {
@@ -63,12 +81,17 @@ func main() {
 		panic(err)
 	}
 	pkg.Dir = filepath.Join(workdir, dir)
+	pkg.Root = workdir
 
-	isLocal := func(name string) bool {
-		return strings.HasPrefix(name, modpath)
+	found := make(map[string][]string)
+
+	if err := walk(pkg, modpath, found); err != nil {
+		panic(err)
 	}
 
-	if err := walk.Walk(context.Background(), pkg, printSources(os.Stdout, workdir), isLocal); err != nil {
-		panic(err)
+	for _, paths := range found {
+		for _, path := range paths {
+			fmt.Println(path)
+		}
 	}
 }
